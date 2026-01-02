@@ -191,14 +191,14 @@ class TestPythonBindings(unittest.TestCase):
                 radius_fraction=0.75,
                 output=tmpdir,
             )
-            artefacts = generate(cfg, as_objects=True)
+            artifacts = generate(cfg, as_objects=True)
 
-            self.assertIsInstance(artefacts, CityArtifacts)
-            self.assertEqual(Path(tmpdir), artefacts.output_dir)
-            self.assertIsInstance(artefacts.summary, CitySummary)
-            self.assertEqual(cfg.grid_size, artefacts.summary.grid_size)
-            self.assertTrue(artefacts.summary_path.exists())
-            self.assertTrue(artefacts.model_path.exists())
+            self.assertIsInstance(artifacts, CityArtifacts)
+            self.assertEqual(Path(tmpdir), artifacts.output_dir)
+            self.assertIsInstance(artifacts.summary, CitySummary)
+            self.assertEqual(cfg.grid_size, artifacts.summary.grid_size)
+            self.assertTrue(artifacts.summary_path.exists())
+            self.assertTrue(artifacts.model_path.exists())
 
 
 if __name__ == '__main__':

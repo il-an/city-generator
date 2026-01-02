@@ -6,3 +6,5 @@ citygen
 .vscode
 *.o
 __pycache__/
+vapor-server/.build/
+vapor-server/.swiftpm/

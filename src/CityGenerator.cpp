@@ -210,31 +210,10 @@ City CityGenerator::generate(const Config &cfg) {
         }
     }
     // 3. Generate primary road network
-    // Vertical and horizontal main roads crossing the centre
     double cx = centre;
     double cy = centre;
-    // Vertical line from top to bottom of developed area
-    city.roads.push_back({cx, cy - radius, cx, cy + radius});
-    // Horizontal line from left to right
-    city.roads.push_back({cx - radius, cy, cx + radius, cy});
-    // Two ring roads at 50% and 90% of the developed radius
-    auto addRing = [&](double r) {
-        double x0 = cx - r;
-        double x1 = cx + r;
-        double y0 = cy - r;
-        double y1 = cy + r;
-        // top
-        city.roads.push_back({x0, y0, x1, y0});
-        // right
-        city.roads.push_back({x1, y0, x1, y1});
-        // bottom
-        city.roads.push_back({x1, y1, x0, y1});
-        // left
-        city.roads.push_back({x0, y1, x0, y0});
-    };
-    addRing(radius * 0.5);
-    addRing(radius * 0.9);
-    // 4. Derive blocks from road lines (axis-aligned grid between road traces)
+    // Road alignments along fixed grid lines; these are reused when carving
+    // blocks so that road geometry and parcels stay consistent.
     std::vector<double> xLines = {cx - radius, cx - radius * 0.9, cx - radius * 0.5,
                                   cx, cx + radius * 0.5, cx + radius * 0.9, cx + radius};
     std::vector<double> yLines = {cy - radius, cy - radius * 0.9, cy - radius * 0.5,
@@ -245,9 +224,39 @@ City CityGenerator::generate(const Config &cfg) {
     };
     uniqSort(xLines);
     uniqSort(yLines);
+    auto classifyRoad = [&](double coord, bool isX) {
+        double anchor = isX ? cx : cy;
+        double denom = (radius > 1e-6) ? radius : 1.0;
+        double norm = std::abs(coord - anchor) / denom;
+        if (norm < 0.15) return RoadType::Arterial;
+        if (norm < 0.6) return RoadType::Secondary;
+        return RoadType::Local;
+    };
+    auto addRoad = [&](double x0, double y0, double x1, double y1, RoadType t) {
+        city.roads.push_back({x0, y0, x1, y1, t});
+    };
+    // Vertical and horizontal lines spanning the developed area.  Widths are
+    // derived from hierarchy.
+    for (double x : xLines) {
+        RoadType type = classifyRoad(x, true);
+        addRoad(x, cy - radius, x, cy + radius, type);
+    }
+    for (double y : yLines) {
+        RoadType type = classifyRoad(y, false);
+        addRoad(cx - radius, y, cx + radius, y, type);
+    }
+    // 4. Derive blocks from road lines (axis-aligned grid between road traces)
+    auto insetFor = [&](double coord, bool isX) {
+        return 0.5 * roadWidth(classifyRoad(coord, isX));
+    };
     for (std::size_t xi = 0; xi + 1 < xLines.size(); ++xi) {
         for (std::size_t yi = 0; yi + 1 < yLines.size(); ++yi) {
-            Rect bounds{xLines[xi], yLines[yi], xLines[xi + 1], yLines[yi + 1]};
+            double x0 = xLines[xi] + insetFor(xLines[xi], true);
+            double x1 = xLines[xi + 1] - insetFor(xLines[xi + 1], true);
+            double y0 = yLines[yi] + insetFor(yLines[yi], false);
+            double y1 = yLines[yi + 1] - insetFor(yLines[yi + 1], false);
+            if (x1 <= x0 || y1 <= y0) continue;
+            Rect bounds{x0, y0, x1, y1};
             double blockCx = bounds.centreX();
             double blockCy = bounds.centreY();
             double dx = blockCx - cx;

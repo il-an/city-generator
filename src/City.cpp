@@ -1,6 +1,45 @@
 #include "City.h"
 
 #include <fstream>
+#include <array>
+#include <cmath>
+
+namespace {
+
+// Write a rectangular prism defined by four base corners to an OBJ stream.
+// The corners should be specified in winding order around the base face.
+void writePrism(std::ofstream &ofs,
+                const std::array<std::pair<double, double>, 4> &base,
+                double baseZ,
+                double topZ,
+                std::size_t &vertexOffset) {
+    ofs << "v " << base[0].first << " " << base[0].second << " " << baseZ << "\n";
+    ofs << "v " << base[1].first << " " << base[1].second << " " << baseZ << "\n";
+    ofs << "v " << base[2].first << " " << base[2].second << " " << baseZ << "\n";
+    ofs << "v " << base[3].first << " " << base[3].second << " " << baseZ << "\n";
+    ofs << "v " << base[0].first << " " << base[0].second << " " << topZ << "\n";
+    ofs << "v " << base[1].first << " " << base[1].second << " " << topZ << "\n";
+    ofs << "v " << base[2].first << " " << base[2].second << " " << topZ << "\n";
+    ofs << "v " << base[3].first << " " << base[3].second << " " << topZ << "\n";
+    auto v = vertexOffset;
+    ofs << "f " << v << " " << v + 1 << " " << v + 2 << "\n";
+    ofs << "f " << v << " " << v + 2 << " " << v + 3 << "\n";
+    ofs << "f " << v + 4 << " " << v + 7 << " " << v + 6 << "\n";
+    ofs << "f " << v + 4 << " " << v + 6 << " " << v + 5 << "\n";
+    ofs << "f " << v << " " << v + 4 << " " << v + 5 << "\n";
+    ofs << "f " << v << " " << v + 5 << " " << v + 1 << "\n";
+    ofs << "f " << v + 1 << " " << v + 5 << " " << v + 6 << "\n";
+    ofs << "f " << v + 1 << " " << v + 6 << " " << v + 2 << "\n";
+    ofs << "f " << v + 2 << " " << v + 6 << " " << v + 7 << "\n";
+    ofs << "f " << v + 2 << " " << v + 7 << " " << v + 3 << "\n";
+    ofs << "f " << v + 3 << " " << v + 7 << " " << v + 4 << "\n";
+    ofs << "f " << v + 3 << " " << v + 4 << " " << v << "\n";
+    vertexOffset += 8;
+}
+
+constexpr double kRoadThickness = 0.05;
+
+} // namespace
 
 City::City(int s) : size(s) {
     zones.resize(size * size, ZoneType::None);
@@ -58,6 +97,27 @@ void City::saveOBJ(const std::string &filename) const {
         ofs << "f " << v + 3 << " " << v + 4 << " " << v << "\n";
         // Update vertexOffset
         vertexOffset += 8;
+    }
+    // Roads: extrude each centreline into a thin rectangular prism so that
+    // the street hierarchy is visible in the 3D export.
+    for (const auto &road : roads) {
+        double dx = road.x2 - road.x1;
+        double dy = road.y2 - road.y1;
+        double len = std::sqrt(dx * dx + dy * dy);
+        if (len < 1e-6) continue;
+        double invLen = 1.0 / len;
+        double nx = -dy * invLen;
+        double ny = dx * invLen;
+        double halfWidth = 0.5 * roadWidth(road.type);
+        double hx = nx * halfWidth;
+        double hy = ny * halfWidth;
+        std::array<std::pair<double, double>, 4> base = {{
+            {road.x1 + hx, road.y1 + hy},
+            {road.x1 - hx, road.y1 - hy},
+            {road.x2 - hx, road.y2 - hy},
+            {road.x2 + hx, road.y2 + hy}
+        }};
+        writePrism(ofs, base, 0.0, kRoadThickness, vertexOffset);
     }
     ofs.close();
 }

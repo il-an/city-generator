@@ -58,6 +58,9 @@ struct Facility {
     Type type = Type::Hospital;
 };
 
+/// Classification of road hierarchy.  Used to vary rendered width.
+enum class RoadType { Arterial, Secondary, Local };
+
 /// Representation of a linear road segment.  Coordinates are expressed in
 /// grid units; segments connect arbitrary points and can be used to
 /// reconstruct the road network in a visualiser.
@@ -66,7 +69,18 @@ struct RoadSegment {
     double y1 = 0.0;
     double x2 = 0.0;
     double y2 = 0.0;
+    RoadType type = RoadType::Local;
 };
+
+/// Width (in world units) associated with each road hierarchy level.
+inline double roadWidth(RoadType type) {
+    switch (type) {
+        case RoadType::Arterial: return 1.6;
+        case RoadType::Secondary: return 1.2;
+        case RoadType::Local:
+        default: return 0.8;
+    }
+}
 
 /**
  * @brief Representation of an entire city.

@@ -26,7 +26,7 @@ city_generator_project/
 ## Building
 
 To build the C++ generator, ensure you have a C++17 compiler installed
-(e.g., `g++`) and simply run:
+(e.g., `clang++`) and simply run:
 
 ```sh
 make

@@ -3,6 +3,7 @@
 #include <random>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace {
 
@@ -193,6 +194,29 @@ static std::vector<Rect> parcelizeBlock(const Block &block, std::mt19937 &rng) {
     return parcels;
 }
 
+// Compute the shortest distance from a parcel to the road network.  Roads are
+// treated as thickened line segments (using their hierarchy width) so parcels
+// adjacent to roads yield zero distance.
+static double distanceToRoads(const Rect &parcel, const std::vector<RoadSegment> &roads) {
+    double best = std::numeric_limits<double>::max();
+    for (const auto &road : roads) {
+        double halfWidth = 0.5 * roadWidth(road.type);
+        double minX = std::min(road.x1, road.x2) - halfWidth;
+        double maxX = std::max(road.x1, road.x2) + halfWidth;
+        double minY = std::min(road.y1, road.y2) - halfWidth;
+        double maxY = std::max(road.y1, road.y2) + halfWidth;
+        double dx = 0.0;
+        if (parcel.x1 < minX) dx = minX - parcel.x1;
+        else if (parcel.x0 > maxX) dx = parcel.x0 - maxX;
+        double dy = 0.0;
+        if (parcel.y1 < minY) dy = minY - parcel.y1;
+        else if (parcel.y0 > maxY) dy = parcel.y0 - maxY;
+        double dist = (dx == 0.0 || dy == 0.0) ? std::max(dx, dy) : std::sqrt(dx * dx + dy * dy);
+        if (dist < best) best = dist;
+    }
+    return best;
+}
+
 } // anonymous namespace
 
 City CityGenerator::generate(const Config &cfg) {
@@ -344,24 +368,67 @@ City CityGenerator::generate(const Config &cfg) {
         }
     }
     // 6. Place facilities (hospitals and schools) on suitable parcels
-    std::vector<std::size_t> eligibleParcels;
+    struct ParcelCandidate {
+        std::size_t idx;
+        double roadDistance;
+    };
+    std::vector<ParcelCandidate> candidates;
+    candidates.reserve(city.buildings.size());
     for (std::size_t i = 0; i < city.buildings.size(); ++i) {
         const auto &b = city.buildings[i];
         if (b.zone == ZoneType::Residential || b.zone == ZoneType::Commercial) {
-            eligibleParcels.push_back(i);
+            double dist = distanceToRoads(b.footprint, city.roads);
+            candidates.push_back({i, dist});
         }
     }
-    if (eligibleParcels.empty()) {
-        for (std::size_t i = 0; i < city.buildings.size(); ++i) eligibleParcels.push_back(i);
+    if (candidates.empty()) {
+        for (std::size_t i = 0; i < city.buildings.size(); ++i) {
+            double dist = distanceToRoads(city.buildings[i].footprint, city.roads);
+            candidates.push_back({i, dist});
+        }
     }
-    std::shuffle(eligibleParcels.begin(), eligibleParcels.end(), rng);
+    std::vector<ParcelCandidate> nearRoads;
+    std::vector<ParcelCandidate> interior;
+    const double accessibleRadius = 1.6; // one arterial lane away from the carriageway
+    for (const auto &c : candidates) {
+        if (c.roadDistance <= accessibleRadius) nearRoads.push_back(c);
+        else interior.push_back(c);
+    }
+    auto sortByAccess = [&](std::vector<ParcelCandidate> &vec) {
+        std::shuffle(vec.begin(), vec.end(), rng);
+        std::sort(vec.begin(), vec.end(),
+                  [](const ParcelCandidate &a, const ParcelCandidate &b) {
+                      return a.roadDistance < b.roadDistance;
+                  });
+    };
+    sortByAccess(nearRoads);
+    sortByAccess(interior);
+    std::vector<std::size_t> orderedParcels;
+    orderedParcels.reserve(candidates.size());
+    for (const auto &c : nearRoads) orderedParcels.push_back(c.idx);
+    for (const auto &c : interior) orderedParcels.push_back(c.idx);
+
+    auto imprintFacility = [&](Building &b, Facility::Type type) {
+        b.facility = true;
+        b.facilityType = type;
+        double area = std::max(b.footprint.width() * b.footprint.height(), 1.0);
+        double scale = std::sqrt(area);
+        if (type == Facility::Type::Hospital) {
+            int target = static_cast<int>(std::round(4.0 + scale * 0.25));
+            b.height = std::clamp(target, 5, 12);
+        } else {
+            int target = static_cast<int>(std::round(2.0 + scale * 0.1));
+            b.height = std::clamp(target, 2, 5);
+        }
+    };
+
     auto placeFacilities = [&](Facility::Type type, std::uint32_t count) {
         std::uint32_t placed = 0;
-        for (std::size_t idx : eligibleParcels) {
+        for (std::size_t idx : orderedParcels) {
             if (placed >= count) break;
             Building &b = city.buildings[idx];
             if (!b.facility) {
-                b.facility = true;
+                imprintFacility(b, type);
                 Facility f;
                 f.x = b.footprint.centreX();
                 f.y = b.footprint.centreY();

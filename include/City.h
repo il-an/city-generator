@@ -23,6 +23,15 @@ enum class ZoneType {
     Green        ///< Parks, green spaces
 };
 
+/// Representation of a public facility such as a hospital or school.
+struct Facility {
+    /// Kinds of facilities supported by the generator.
+    enum class Type { Hospital, School };
+    double x = 0.0;
+    double y = 0.0;
+    Type type = Type::Hospital;
+};
+
 /// Simple axis-aligned rectangle used for blocks and parcels.
 struct Rect {
     double x0 = 0.0;
@@ -42,20 +51,12 @@ struct Building {
     ZoneType zone = ZoneType::None;
     int height = 0;          ///< Height expressed in arbitrary storeys
     bool facility = false;   ///< True if this building hosts a public facility
+    Facility::Type facilityType = Facility::Type::Hospital; ///< Meaningful when facility==true
 };
 
 /// Representation of a city block bounded by roads.
 struct Block {
     Rect bounds;
-};
-
-/// Representation of a public facility such as a hospital or school.
-struct Facility {
-    /// Kinds of facilities supported by the generator.
-    enum class Type { Hospital, School };
-    double x = 0.0;
-    double y = 0.0;
-    Type type = Type::Hospital;
 };
 
 /// Classification of road hierarchy.  Used to vary rendered width.
@@ -131,12 +132,13 @@ public:
     /**
      * @brief Write the city as a simple 3D model in Wavefront OBJ format.
      *
-     * Each non‑green parcel footprint is represented as an axis‑aligned box
-     * extruded vertically from the parcel base.  Green parcels contribute no
-     * geometry, while undeveloped parcels (None) are ignored.  The OBJ file
-     * contains vertices and triangular faces; materials are omitted for
-     * simplicity.  Note that building height is scaled by 1.0 unit per
-     * floor, but this can be adjusted by postprocessing.
+     * Each parcel footprint is represented by a lightweight archetype:
+     * generic parcels become extruded boxes, parks become low pads, and
+     * facilities use bespoke school/hospital forms.  Undeveloped parcels
+     * (None) are ignored.  The OBJ file contains vertices and triangular
+     * faces; materials are omitted for simplicity.  Note that building
+     * height is scaled by 1.0 unit per floor, but this can be adjusted by
+     * postprocessing.
      *
      * @param filename Path to the OBJ file to create.
      */

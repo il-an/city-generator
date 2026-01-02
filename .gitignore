@@ -1,0 +1,6 @@
+.cache/
+build
+compile_commands.json
+citygen
+.DS_Store
+.vscode

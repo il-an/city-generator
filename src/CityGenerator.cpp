@@ -58,23 +58,74 @@ static ZoneType sampleZone(const City &city, const Rect &r) {
 
 // Sample a height for a parcel based on its zone and footprint size.  Larger
 // footprints tend to produce slightly taller buildings in commercial areas.
-static int sampleHeight(ZoneType zone, const Rect &footprint, std::mt19937 &rng) {
+static int sampleHeight(ZoneType zone, const Rect &footprint, double distToCentre,
+                        double cityRadius, std::mt19937 &rng) {
     double area = std::max(footprint.width() * footprint.height(), 1.0);
-    int height = 1;
-    if (zone == ZoneType::Residential) {
-        std::uniform_int_distribution<int> distH(2, 6);
-        height = distH(rng);
-    } else if (zone == ZoneType::Commercial) {
-        std::uniform_int_distribution<int> distH(5, 18);
-        height = distH(rng);
-        height += static_cast<int>(std::min(area / 30.0, 5.0));
-    } else if (zone == ZoneType::Industrial) {
-        std::uniform_int_distribution<int> distH(3, 8);
-        height = distH(rng);
-    } else {
-        height = 0;
+    double radial = 1.0 - std::clamp(distToCentre / std::max(cityRadius, 1e-6), 0.0, 1.0);
+    auto clampHeight = [](double h, int minH, int maxH) {
+        int v = static_cast<int>(std::round(h));
+        return std::clamp(v, minH, maxH);
+    };
+    switch (zone) {
+        case ZoneType::Residential: {
+            std::lognormal_distribution<double> distH(std::log(3.0), 0.35);
+            double h = distH(rng);
+            h *= 0.6 + 0.7 * radial; // taller near centre, modest elsewhere
+            h += std::min(std::sqrt(area) * 0.1, 1.5);
+            return clampHeight(h, 2, 12);
+        }
+        case ZoneType::Commercial: {
+            std::lognormal_distribution<double> distH(std::log(8.0), 0.5);
+            double h = distH(rng);
+            h *= 0.8 + 1.2 * radial; // CBD bias
+            h += std::min(std::sqrt(area) * 0.15, 3.0);
+            return clampHeight(h, 4, 40);
+        }
+        case ZoneType::Industrial: {
+            std::exponential_distribution<double> distH(1.0 / 5.0);
+            double h = 2.0 + distH(rng);
+            h *= 0.7 + 0.6 * radial;
+            h += std::min(std::sqrt(area) * 0.05, 1.0);
+            return clampHeight(h, 2, 14);
+        }
+        default:
+            return 0;
     }
-    return std::max(height, 0);
+}
+
+// Shrink a parcel footprint and apply small random jitter so buildings do not
+// perfectly fill or align within their parcels.
+static Rect jitterFootprint(const Rect &parcel, std::mt19937 &rng) {
+    double w = parcel.width();
+    double h = parcel.height();
+    if (w <= 0.0 || h <= 0.0) return parcel;
+    std::uniform_real_distribution<double> scaleDist(0.4, 0.9);
+    double areaScale = scaleDist(rng);
+    double linearScale = std::sqrt(areaScale);
+    double newW = w * linearScale;
+    double newH = h * linearScale;
+    double marginX = (w - newW) * 0.5;
+    double marginY = (h - newH) * 0.5;
+    double jitterFrac = 0.6;
+    std::uniform_real_distribution<double> jitterX(-marginX * jitterFrac, marginX * jitterFrac);
+    std::uniform_real_distribution<double> jitterY(-marginY * jitterFrac, marginY * jitterFrac);
+    double cx = parcel.centreX() + jitterX(rng);
+    double cy = parcel.centreY() + jitterY(rng);
+    Rect r;
+    r.x0 = cx - newW * 0.5;
+    r.x1 = cx + newW * 0.5;
+    r.y0 = cy - newH * 0.5;
+    r.y1 = cy + newH * 0.5;
+    // Clamp to stay within the parcel bounds
+    double shiftX0 = std::max(parcel.x0 - r.x0, 0.0);
+    double shiftY0 = std::max(parcel.y0 - r.y0, 0.0);
+    double shiftX1 = std::max(r.x1 - parcel.x1, 0.0);
+    double shiftY1 = std::max(r.y1 - parcel.y1, 0.0);
+    r.x0 += shiftX0 - shiftX1;
+    r.x1 += shiftX0 - shiftX1;
+    r.y0 += shiftY0 - shiftY1;
+    r.y1 += shiftY0 - shiftY1;
+    return r;
 }
 
 // Recursively subdivide a rectangle into smaller lots using a binary split
@@ -271,18 +322,19 @@ City CityGenerator::generate(const Config &cfg) {
     for (const auto &block : city.blocks) {
         std::vector<Rect> parcels = parcelizeBlock(block, rng);
         for (const auto &footprint : parcels) {
-            double cxp = footprint.centreX();
-            double cyp = footprint.centreY();
+            Rect adjusted = jitterFootprint(footprint, rng);
+            double cxp = adjusted.centreX();
+            double cyp = adjusted.centreY();
             double dx = cxp - cx;
             double dy = cyp - cy;
             double dist = std::sqrt(dx * dx + dy * dy);
             if (dist > radius * 1.02) continue;
-            ZoneType z = sampleZone(city, footprint);
+            ZoneType z = sampleZone(city, adjusted);
             if (z == ZoneType::None) continue;
             Building b;
-            b.footprint = footprint;
+            b.footprint = adjusted;
             b.zone = z;
-            b.height = sampleHeight(z, footprint, rng);
+            b.height = sampleHeight(z, adjusted, dist, radius, rng);
             b.facility = false;
             // If the parcel overlaps predominantly green cells, downgrade to green
             if (z == ZoneType::Green) {

@@ -13,13 +13,40 @@
 
 namespace {
 
-// Write a rectangular prism defined by four base corners to an OBJ stream.
+using Quad = std::array<std::pair<double, double>, 4>;
+
+Quad rectToQuad(const Rect &r) {
+    return {{
+        {r.x0, r.y0},
+        {r.x1, r.y0},
+        {r.x1, r.y1},
+        {r.x0, r.y1}
+    }};
+}
+
+Quad toQuad(const std::array<Vec2, 4> &v) {
+    return {{
+        {v[0].x, v[0].y},
+        {v[1].x, v[1].y},
+        {v[2].x, v[2].y},
+        {v[3].x, v[3].y}
+    }};
+}
+
+Quad buildingQuad(const Building &b) {
+    if (b.hasCorners) {
+        return toQuad(b.corners);
+    }
+    return rectToQuad(b.footprint);
+}
+
+// Write a prism defined by four base corners to an OBJ stream.
 // The corners should be specified in winding order around the base face.
-void writePrism(std::ofstream &ofs,
-                const std::array<std::pair<double, double>, 4> &base,
-                double baseZ,
-                double topZ,
-                std::size_t &vertexOffset) {
+void writeQuadPrism(std::ofstream &ofs,
+                    const Quad &base,
+                    double baseZ,
+                    double topZ,
+                    std::size_t &vertexOffset) {
     ofs << "v " << base[0].first << " " << base[0].second << " " << baseZ << "\n";
     ofs << "v " << base[1].first << " " << base[1].second << " " << baseZ << "\n";
     ofs << "v " << base[2].first << " " << base[2].second << " " << baseZ << "\n";
@@ -47,13 +74,7 @@ void writePrism(std::ofstream &ofs,
 // Convenience helper to extrude an axis-aligned rectangle into a prism.
 void writeRectPrism(std::ofstream &ofs, const Rect &r,
                     double baseZ, double topZ, std::size_t &vertexOffset) {
-    std::array<std::pair<double, double>, 4> base = {{
-        {r.x0, r.y0},
-        {r.x1, r.y0},
-        {r.x1, r.y1},
-        {r.x0, r.y1}
-    }};
-    writePrism(ofs, base, baseZ, topZ, vertexOffset);
+    writeQuadPrism(ofs, rectToQuad(r), baseZ, topZ, vertexOffset);
 }
 
 // Inset a rectangle by a fixed amount, clamping so the rectangle never flips.
@@ -204,16 +225,16 @@ void appendTriangle(MeshBuffer &buf, const Vec3 &p0, const Vec3 &p1,
     buf.indices.push_back(base + 2);
 }
 
-void appendRectPrism(MeshBuffer &buf, const Rect &r,
+void appendQuadPrism(MeshBuffer &buf, const Quad &q,
                      double baseZ, double topZ) {
-    Vec3 p0 = toGltfCoords(r.x0, r.y0, baseZ);
-    Vec3 p1 = toGltfCoords(r.x1, r.y0, baseZ);
-    Vec3 p2 = toGltfCoords(r.x1, r.y1, baseZ);
-    Vec3 p3 = toGltfCoords(r.x0, r.y1, baseZ);
-    Vec3 p4 = toGltfCoords(r.x0, r.y0, topZ);
-    Vec3 p5 = toGltfCoords(r.x1, r.y0, topZ);
-    Vec3 p6 = toGltfCoords(r.x1, r.y1, topZ);
-    Vec3 p7 = toGltfCoords(r.x0, r.y1, topZ);
+    Vec3 p0 = toGltfCoords(q[0].first, q[0].second, baseZ);
+    Vec3 p1 = toGltfCoords(q[1].first, q[1].second, baseZ);
+    Vec3 p2 = toGltfCoords(q[2].first, q[2].second, baseZ);
+    Vec3 p3 = toGltfCoords(q[3].first, q[3].second, baseZ);
+    Vec3 p4 = toGltfCoords(q[0].first, q[0].second, topZ);
+    Vec3 p5 = toGltfCoords(q[1].first, q[1].second, topZ);
+    Vec3 p6 = toGltfCoords(q[2].first, q[2].second, topZ);
+    Vec3 p7 = toGltfCoords(q[3].first, q[3].second, topZ);
     const Vec3 nDown{0.0, -1.0, 0.0};
     const Vec3 nUp{0.0, 1.0, 0.0};
     const Vec3 nPosX{1.0, 0.0, 0.0};
@@ -240,6 +261,11 @@ void appendRectPrism(MeshBuffer &buf, const Rect &r,
     appendTriangle(buf, p0, p5, p4, nNegZ);
 }
 
+void appendRectPrism(MeshBuffer &buf, const Rect &r,
+                     double baseZ, double topZ) {
+    appendQuadPrism(buf, rectToQuad(r), baseZ, topZ);
+}
+
 } // namespace
 
 City::City(int s) : size(s) {
@@ -261,79 +287,78 @@ void City::saveOBJ(const std::string &filename) const {
     // building for clarity, but the file can contain thousands of objects.
     // A running vertex index is maintained to offset face indices.
     std::size_t vertexOffset = 1;
+    auto boundsFromQuad = [](const Quad &q) {
+        Rect r;
+        r.x0 = r.x1 = q[0].first;
+        r.y0 = r.y1 = q[0].second;
+        for (int i = 1; i < 4; ++i) {
+            r.x0 = std::min(r.x0, q[i].first);
+            r.x1 = std::max(r.x1, q[i].first);
+            r.y0 = std::min(r.y0, q[i].second);
+            r.y1 = std::max(r.y1, q[i].second);
+        }
+        return r;
+    };
+    auto scaleQuad = [](const Quad &q, double scale) {
+        double cx = 0.0, cy = 0.0;
+        for (const auto &p : q) { cx += p.first; cy += p.second; }
+        cx *= 0.25; cy *= 0.25;
+        Quad out;
+        for (int i = 0; i < 4; ++i) {
+            double dx = q[i].first - cx;
+            double dy = q[i].second - cy;
+            out[i].first = cx + dx * scale;
+            out[i].second = cy + dy * scale;
+        }
+        return out;
+    };
     auto emitStandard = [&](const Building &b) {
         double h = std::max(1.0, static_cast<double>(b.height));
-        writeRectPrism(ofs, b.footprint, 0.0, h, vertexOffset);
+        writeQuadPrism(ofs, buildingQuad(b), 0.0, h, vertexOffset);
     };
-    auto emitPark = [&](const Rect &fp) {
-        double margin = std::min(fp.width(), fp.height()) * 0.08;
-        Rect lawn = insetRect(fp, margin);
+    auto emitPark = [&](const Building &b) {
+        Quad base = buildingQuad(b);
+        Rect bounds = boundsFromQuad(base);
+        double minDim = std::min(bounds.width(), bounds.height());
+        double marginFrac = 0.08;
+        double scale = std::max(0.2, 1.0 - 2.0 * marginFrac);
+        Quad lawn = scaleQuad(base, scale);
         double padHeight = 0.08;
-        writeRectPrism(ofs, lawn, 0.0, padHeight, vertexOffset);
-        double baseSize = std::min(lawn.width(), lawn.height()) * 0.2;
-        double planterSize = std::clamp(baseSize, 0.2, std::min(lawn.width(), lawn.height()) * 0.45);
-        Rect planterA{lawn.x0, lawn.y0, lawn.x0 + planterSize, lawn.y0 + planterSize};
-        Rect planterB{lawn.x1 - planterSize, lawn.y1 - planterSize, lawn.x1, lawn.y1};
+        writeQuadPrism(ofs, lawn, 0.0, padHeight, vertexOffset);
+        double baseScale = 0.3 + (0.2 / std::max(minDim, 1.0));
+        double planterScale = std::clamp(baseScale, 0.25, 0.65);
+        Quad planterA = scaleQuad(lawn, planterScale);
+        Quad planterB = scaleQuad(lawn, 1.0 - planterScale * 0.5);
         double planterHeight = padHeight * 2.5;
-        writeRectPrism(ofs, planterA, padHeight, padHeight + planterHeight, vertexOffset);
-        writeRectPrism(ofs, planterB, padHeight, padHeight + planterHeight, vertexOffset);
+        writeQuadPrism(ofs, planterA, padHeight, padHeight + planterHeight, vertexOffset);
+        writeQuadPrism(ofs, planterB, padHeight, padHeight + planterHeight, vertexOffset);
     };
     auto emitSchool = [&](const Building &b) {
-        const Rect &fp = b.footprint;
-        double w = fp.width();
-        double h = fp.height();
-        Rect field = insetRect(fp, std::min(w, h) * 0.07);
+        Quad base = buildingQuad(b);
+        Quad field = scaleQuad(base, 0.92);
         double fieldHeight = 0.05;
-        writeRectPrism(ofs, field, 0.0, fieldHeight, vertexOffset);
-        bool wide = w >= h;
-        double buildingW = wide ? w * 0.45 : w * 0.6;
-        double buildingH = wide ? h * 0.6 : h * 0.45;
-        Rect buildingRect;
-        buildingRect.x0 = fp.x0 + w * 0.08;
-        buildingRect.y0 = fp.y0 + h * (wide ? 0.2 : 0.08);
-        buildingRect.x1 = buildingRect.x0 + buildingW;
-        buildingRect.y1 = buildingRect.y0 + buildingH;
-        double maxX = fp.x1 - w * 0.05;
-        double maxY = fp.y1 - h * 0.05;
-        if (buildingRect.x1 > maxX) {
-            double shift = buildingRect.x1 - maxX;
-            buildingRect.x0 -= shift;
-            buildingRect.x1 -= shift;
-        }
-        if (buildingRect.y1 > maxY) {
-            double shift = buildingRect.y1 - maxY;
-            buildingRect.y0 -= shift;
-            buildingRect.y1 -= shift;
-        }
+        writeQuadPrism(ofs, field, 0.0, fieldHeight, vertexOffset);
+        Quad building = scaleQuad(base, 0.55);
         double schoolHeight = std::max(2.0, static_cast<double>(b.height));
-        writeRectPrism(ofs, buildingRect, 0.0, schoolHeight, vertexOffset);
+        writeQuadPrism(ofs, building, 0.0, schoolHeight, vertexOffset);
     };
     auto emitHospital = [&](const Building &b) {
-        const Rect &fp = b.footprint;
-        double w = fp.width();
-        double h = fp.height();
-        Rect podium = insetRect(fp, std::min(w, h) * 0.08);
+        Quad base = buildingQuad(b);
+        Quad podium = scaleQuad(base, 0.9);
         double podiumTop = std::max(1.2, static_cast<double>(b.height) * 0.25);
-        writeRectPrism(ofs, podium, 0.0, podiumTop, vertexOffset);
-        double cx = fp.centreX();
-        double cy = fp.centreY();
-        bool wide = w >= h;
-        double mainW = wide ? w * 0.7 : w * 0.45;
-        double mainH = wide ? h * 0.45 : h * 0.7;
-        Rect main{cx - mainW * 0.5, cy - mainH * 0.5, cx + mainW * 0.5, cy + mainH * 0.5};
+        writeQuadPrism(ofs, podium, 0.0, podiumTop, vertexOffset);
+        Quad main = scaleQuad(base, 0.65);
         double mainTop = std::max(podiumTop + 2.0, static_cast<double>(b.height));
-        writeRectPrism(ofs, main, podiumTop, mainTop, vertexOffset);
-        double wingW = wide ? w * 0.28 : w * 0.85;
-        double wingH = wide ? h * 0.85 : h * 0.28;
-        Rect wing{cx - wingW * 0.5, cy - wingH * 0.5, cx + wingW * 0.5, cy + wingH * 0.5};
+        writeQuadPrism(ofs, main, podiumTop, mainTop, vertexOffset);
+        Quad wing = scaleQuad(base, 0.45);
         double wingTop = std::max(podiumTop + 1.2, mainTop * 0.9);
-        writeRectPrism(ofs, wing, podiumTop, wingTop, vertexOffset);
+        writeQuadPrism(ofs, wing, podiumTop, wingTop, vertexOffset);
     };
     for (const auto &b : buildings) {
         if (b.zone == ZoneType::None) continue;
         if (b.zone == ZoneType::Green) {
             ofs << "usemtl " << materialForZone(b.zone) << "\n";
-            emitPark(b.footprint);
+            emitPark(b);
             continue;
         }
         if (b.facility) {
@@ -368,7 +393,7 @@ void City::saveOBJ(const std::string &filename) const {
             {road.x2 - hx, road.y2 - hy},
             {road.x2 + hx, road.y2 + hy}
         }};
-        writePrism(ofs, base, 0.0, kRoadThickness, vertexOffset);
+        writeQuadPrism(ofs, base, 0.0, kRoadThickness, vertexOffset);
     }
     ofs.close();
 }
@@ -378,78 +403,76 @@ void City::saveGLTF(const std::string &filename, bool binary) const {
     auto bufferFor = [&](const std::string &mat) -> MeshBuffer & {
         return meshByMaterial[mat];
     };
+    auto boundsFromQuad = [](const Quad &q) {
+        Rect r;
+        r.x0 = r.x1 = q[0].first;
+        r.y0 = r.y1 = q[0].second;
+        for (int i = 1; i < 4; ++i) {
+            r.x0 = std::min(r.x0, q[i].first);
+            r.x1 = std::max(r.x1, q[i].first);
+            r.y0 = std::min(r.y0, q[i].second);
+            r.y1 = std::max(r.y1, q[i].second);
+        }
+        return r;
+    };
+    auto scaleQuad = [](const Quad &q, double scale) {
+        double cx = 0.0, cy = 0.0;
+        for (const auto &p : q) { cx += p.first; cy += p.second; }
+        cx *= 0.25; cy *= 0.25;
+        Quad out;
+        for (int i = 0; i < 4; ++i) {
+            double dx = q[i].first - cx;
+            double dy = q[i].second - cy;
+            out[i].first = cx + dx * scale;
+            out[i].second = cy + dy * scale;
+        }
+        return out;
+    };
     auto emitStandard = [&](const Building &b) {
         double h = std::max(1.0, static_cast<double>(b.height));
-        appendRectPrism(bufferFor(materialForZone(b.zone)), b.footprint, 0.0, h);
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), buildingQuad(b), 0.0, h);
     };
-    auto emitPark = [&](const Rect &fp) {
-        double margin = std::min(fp.width(), fp.height()) * 0.08;
-        Rect lawn = insetRect(fp, margin);
+    auto emitPark = [&](const Building &b) {
+        Quad base = buildingQuad(b);
+        Rect bounds = boundsFromQuad(base);
+        double minDim = std::min(bounds.width(), bounds.height());
+        double scale = std::max(0.2, 1.0 - 0.16);
+        Quad lawn = scaleQuad(base, scale);
         double padHeight = 0.08;
-        appendRectPrism(bufferFor("mat_green"), lawn, 0.0, padHeight);
-        double baseSize = std::min(lawn.width(), lawn.height()) * 0.2;
-        double planterSize = std::clamp(baseSize, 0.2, std::min(lawn.width(), lawn.height()) * 0.45);
-        Rect planterA{lawn.x0, lawn.y0, lawn.x0 + planterSize, lawn.y0 + planterSize};
-        Rect planterB{lawn.x1 - planterSize, lawn.y1 - planterSize, lawn.x1, lawn.y1};
+        appendQuadPrism(bufferFor("mat_green"), lawn, 0.0, padHeight);
+        double baseScale = 0.3 + (0.2 / std::max(minDim, 1.0));
+        double planterScale = std::clamp(baseScale, 0.25, 0.65);
+        Quad planterA = scaleQuad(lawn, planterScale);
+        Quad planterB = scaleQuad(lawn, 1.0 - planterScale * 0.5);
         double planterHeight = padHeight * 2.5;
-        appendRectPrism(bufferFor("mat_green"), planterA, padHeight, padHeight + planterHeight);
-        appendRectPrism(bufferFor("mat_green"), planterB, padHeight, padHeight + planterHeight);
+        appendQuadPrism(bufferFor("mat_green"), planterA, padHeight, padHeight + planterHeight);
+        appendQuadPrism(bufferFor("mat_green"), planterB, padHeight, padHeight + planterHeight);
     };
     auto emitSchool = [&](const Building &b) {
-        const Rect &fp = b.footprint;
-        double w = fp.width();
-        double h = fp.height();
-        Rect field = insetRect(fp, std::min(w, h) * 0.07);
+        Quad base = buildingQuad(b);
+        Quad field = scaleQuad(base, 0.92);
         double fieldHeight = 0.05;
-        appendRectPrism(bufferFor(materialForZone(b.zone)), field, 0.0, fieldHeight);
-        bool wide = w >= h;
-        double buildingW = wide ? w * 0.45 : w * 0.6;
-        double buildingH = wide ? h * 0.6 : h * 0.45;
-        Rect buildingRect;
-        buildingRect.x0 = fp.x0 + w * 0.08;
-        buildingRect.y0 = fp.y0 + h * (wide ? 0.2 : 0.08);
-        buildingRect.x1 = buildingRect.x0 + buildingW;
-        buildingRect.y1 = buildingRect.y0 + buildingH;
-        double maxX = fp.x1 - w * 0.05;
-        double maxY = fp.y1 - h * 0.05;
-        if (buildingRect.x1 > maxX) {
-            double shift = buildingRect.x1 - maxX;
-            buildingRect.x0 -= shift;
-            buildingRect.x1 -= shift;
-        }
-        if (buildingRect.y1 > maxY) {
-            double shift = buildingRect.y1 - maxY;
-            buildingRect.y0 -= shift;
-            buildingRect.y1 -= shift;
-        }
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), field, 0.0, fieldHeight);
+        Quad buildingRect = scaleQuad(base, 0.55);
         double schoolHeight = std::max(2.0, static_cast<double>(b.height));
-        appendRectPrism(bufferFor(materialForZone(b.zone)), buildingRect, 0.0, schoolHeight);
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), buildingRect, 0.0, schoolHeight);
     };
     auto emitHospital = [&](const Building &b) {
-        const Rect &fp = b.footprint;
-        double w = fp.width();
-        double h = fp.height();
-        Rect podium = insetRect(fp, std::min(w, h) * 0.08);
+        Quad base = buildingQuad(b);
+        Quad podium = scaleQuad(base, 0.9);
         double podiumTop = std::max(1.2, static_cast<double>(b.height) * 0.25);
-        appendRectPrism(bufferFor(materialForZone(b.zone)), podium, 0.0, podiumTop);
-        double cx = fp.centreX();
-        double cy = fp.centreY();
-        bool wide = w >= h;
-        double mainW = wide ? w * 0.7 : w * 0.45;
-        double mainH = wide ? h * 0.45 : h * 0.7;
-        Rect main{cx - mainW * 0.5, cy - mainH * 0.5, cx + mainW * 0.5, cy + mainH * 0.5};
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), podium, 0.0, podiumTop);
+        Quad main = scaleQuad(base, 0.65);
         double mainTop = std::max(podiumTop + 2.0, static_cast<double>(b.height));
-        appendRectPrism(bufferFor(materialForZone(b.zone)), main, podiumTop, mainTop);
-        double wingW = wide ? w * 0.28 : w * 0.85;
-        double wingH = wide ? h * 0.85 : h * 0.28;
-        Rect wing{cx - wingW * 0.5, cy - wingH * 0.5, cx + wingW * 0.5, cy + wingH * 0.5};
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), main, podiumTop, mainTop);
+        Quad wing = scaleQuad(base, 0.45);
         double wingTop = std::max(podiumTop + 1.2, mainTop * 0.9);
-        appendRectPrism(bufferFor(materialForZone(b.zone)), wing, podiumTop, wingTop);
+        appendQuadPrism(bufferFor(materialForZone(b.zone)), wing, podiumTop, wingTop);
     };
     for (const auto &b : buildings) {
         if (b.zone == ZoneType::None) continue;
         if (b.zone == ZoneType::Green) {
-            emitPark(b.footprint);
+            emitPark(b);
             continue;
         }
         if (b.facility) {

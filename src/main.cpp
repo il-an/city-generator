@@ -57,6 +57,13 @@ int main(int argc, char **argv) {
                 std::cerr << e.what() << std::endl;
                 return 1;
             }
+        } else if (auto s = parseArg(arg, "--layout="); !s.empty()) {
+            try {
+                cfg.layout = layoutTypeFromString(s);
+            } catch (const std::invalid_argument &e) {
+                std::cerr << e.what() << std::endl;
+                return 1;
+            }
         } else if (auto s = parseArg(arg, "--output="); !s.empty()) {
             outDir = s;
         } else if (arg == "--help" || arg == "-h") {
@@ -70,6 +77,7 @@ int main(int argc, char **argv) {
                       << "  --grid-size=<number>       Width/height of the grid (default 100)\n"
                       << "  --radius-fraction=<float>  Fraction of half grid forming city radius (default 0.8)\n"
                       << "  --format=<obj|gltf|glb>    Output mesh format (default obj)\n"
+                      << "  --layout=<grid|radial>     Street layout type (default grid)\n"
                       << "  --output=<dir>             Directory to output results (required)\n"
                       << std::endl;
             return 0;

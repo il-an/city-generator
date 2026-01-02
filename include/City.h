@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <string>
+#include <array>
 
 /**
  * @file City.h
@@ -21,6 +22,12 @@ enum class ZoneType {
     Commercial,  ///< Commercial/business districts
     Industrial,  ///< Industrial zones (factories, warehouses)
     Green        ///< Parks, green spaces
+};
+
+/// Simple 2D point convenience type.
+struct Vec2 {
+    double x = 0.0;
+    double y = 0.0;
 };
 
 /// Representation of a public facility such as a hospital or school.
@@ -47,16 +54,20 @@ struct Rect {
 
 /// Representation of a single building placed on a parcel footprint.
 struct Building {
-    Rect footprint;          ///< Axis-aligned footprint polygon
+    Rect footprint;          ///< Axis-aligned footprint bounding box
+    std::array<Vec2, 4> corners{}; ///< Oriented base corners (convex quad)
     ZoneType zone = ZoneType::None;
     int height = 0;          ///< Height expressed in arbitrary storeys
     bool facility = false;   ///< True if this building hosts a public facility
+    bool hasCorners = false; ///< True when corners holds the precise footprint
     Facility::Type facilityType = Facility::Type::Hospital; ///< Meaningful when facility==true
 };
 
 /// Representation of a city block bounded by roads.
 struct Block {
     Rect bounds;
+    std::array<Vec2, 4> corners{};
+    bool hasCorners = false;
 };
 
 /// Classification of road hierarchy.  Used to vary rendered width.

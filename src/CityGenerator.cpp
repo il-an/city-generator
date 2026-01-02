@@ -4,6 +4,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <array>
 
 namespace {
 
@@ -194,6 +195,87 @@ static std::vector<Rect> parcelizeBlock(const Block &block, std::mt19937 &rng) {
     return parcels;
 }
 
+static std::array<Vec2, 4> rectToQuad(const Rect &r) {
+    return {{
+        {r.x0, r.y0},
+        {r.x1, r.y0},
+        {r.x1, r.y1},
+        {r.x0, r.y1}
+    }};
+}
+
+static Rect boundsFromQuad(const std::array<Vec2, 4> &q) {
+    Rect r;
+    r.x0 = r.x1 = q[0].x;
+    r.y0 = r.y1 = q[0].y;
+    for (int i = 1; i < 4; ++i) {
+        r.x0 = std::min(r.x0, q[i].x);
+        r.x1 = std::max(r.x1, q[i].x);
+        r.y0 = std::min(r.y0, q[i].y);
+        r.y1 = std::max(r.y1, q[i].y);
+    }
+    return r;
+}
+
+static Vec2 centroidOfQuad(const std::array<Vec2, 4> &q) {
+    double cx = 0.0;
+    double cy = 0.0;
+    for (const auto &p : q) {
+        cx += p.x;
+        cy += p.y;
+    }
+    cx *= 0.25;
+    cy *= 0.25;
+    return {cx, cy};
+}
+
+static Vec2 polarToCartesian(double cx, double cy, double r, double theta) {
+    double x = cx + r * std::cos(theta);
+    double y = cy + r * std::sin(theta);
+    return {x, y};
+}
+
+// Convert a wedge block into quads by unwrapping to a rectangle in (arc, radius)
+// space, parcelising, and mapping back to polar coordinates.
+static std::vector<std::array<Vec2, 4>> parcelizeWedge(double cx, double cy,
+                                                       double r0, double r1,
+                                                       double theta0, double theta1,
+                                                       std::mt19937 &rng) {
+    double radialThickness = r1 - r0;
+    if (radialThickness <= 0.1) return {};
+    double midR = (r0 + r1) * 0.5;
+    double thetaSpan = theta1 - theta0;
+    if (thetaSpan <= 1e-4 || midR <= 1e-6) return {};
+    double arcLength = thetaSpan * midR;
+    Rect uvBlock{0.0, 0.0, arcLength, radialThickness};
+    std::vector<Rect> uvParcels;
+    const double minParcel = 3.0;
+    const double maxParcel = 12.0;
+    subdivideRect(uvBlock, minParcel, maxParcel, rng, uvParcels);
+    std::vector<std::array<Vec2, 4>> quads;
+    quads.reserve(uvParcels.size());
+    for (const auto &uv : uvParcels) {
+        Rect jittered = jitterFootprint(uv, rng);
+        double u0 = jittered.x0;
+        double u1 = jittered.x1;
+        double v0 = jittered.y0;
+        double v1 = jittered.y1;
+        auto uvToWorld = [&](double u, double v) {
+            double t = theta0 + (u / arcLength) * thetaSpan;
+            double rr = r0 + v;
+            return polarToCartesian(cx, cy, rr, t);
+        };
+        std::array<Vec2, 4> quad = {{
+            uvToWorld(u0, v0),
+            uvToWorld(u1, v0),
+            uvToWorld(u1, v1),
+            uvToWorld(u0, v1)
+        }};
+        quads.push_back(quad);
+    }
+    return quads;
+}
+
 // Compute the shortest distance from a parcel to the road network.  Roads are
 // treated as thickened line segments (using their hierarchy width) so parcels
 // adjacent to roads yield zero distance.
@@ -284,87 +366,188 @@ City CityGenerator::generate(const Config &cfg) {
             converted++;
         }
     }
-    // 3. Generate primary road network
+    // 3. Generate primary road network and parcels according to layout
     double cx = centre;
     double cy = centre;
-    // Road alignments along fixed grid lines; these are reused when carving
-    // blocks so that road geometry and parcels stay consistent.
-    std::vector<double> xLines = {cx - radius, cx - radius * 0.9, cx - radius * 0.5,
-                                  cx, cx + radius * 0.5, cx + radius * 0.9, cx + radius};
-    std::vector<double> yLines = {cy - radius, cy - radius * 0.9, cy - radius * 0.5,
-                                  cy, cy + radius * 0.5, cy + radius * 0.9, cy + radius};
-    auto uniqSort = [](std::vector<double> &vals) {
-        std::sort(vals.begin(), vals.end());
-        vals.erase(std::unique(vals.begin(), vals.end()), vals.end());
-    };
-    uniqSort(xLines);
-    uniqSort(yLines);
-    auto classifyRoad = [&](double coord, bool isX) {
-        double anchor = isX ? cx : cy;
-        double denom = (radius > 1e-6) ? radius : 1.0;
-        double norm = std::abs(coord - anchor) / denom;
-        if (norm < 0.15) return RoadType::Arterial;
-        if (norm < 0.6) return RoadType::Secondary;
-        return RoadType::Local;
-    };
-    auto addRoad = [&](double x0, double y0, double x1, double y1, RoadType t) {
-        city.roads.push_back({x0, y0, x1, y1, t});
-    };
-    // Vertical and horizontal lines spanning the developed area.  Widths are
-    // derived from hierarchy.
-    for (double x : xLines) {
-        RoadType type = classifyRoad(x, true);
-        addRoad(x, cy - radius, x, cy + radius, type);
-    }
-    for (double y : yLines) {
-        RoadType type = classifyRoad(y, false);
-        addRoad(cx - radius, y, cx + radius, y, type);
-    }
-    // 4. Derive blocks from road lines (axis-aligned grid between road traces)
-    auto insetFor = [&](double coord, bool isX) {
-        return 0.5 * roadWidth(classifyRoad(coord, isX));
-    };
-    for (std::size_t xi = 0; xi + 1 < xLines.size(); ++xi) {
-        for (std::size_t yi = 0; yi + 1 < yLines.size(); ++yi) {
-            double x0 = xLines[xi] + insetFor(xLines[xi], true);
-            double x1 = xLines[xi + 1] - insetFor(xLines[xi + 1], true);
-            double y0 = yLines[yi] + insetFor(yLines[yi], false);
-            double y1 = yLines[yi + 1] - insetFor(yLines[yi + 1], false);
-            if (x1 <= x0 || y1 <= y0) continue;
-            Rect bounds{x0, y0, x1, y1};
-            double blockCx = bounds.centreX();
-            double blockCy = bounds.centreY();
-            double dx = blockCx - cx;
-            double dy = blockCy - cy;
-            double dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > radius * 1.05) continue; // outside developed area
-            if (bounds.width() < 1.0 || bounds.height() < 1.0) continue;
-            city.blocks.push_back({bounds});
+    if (cfg.layout == Config::LayoutType::Grid) {
+        // Road alignments along fixed grid lines; these are reused when carving
+        // blocks so that road geometry and parcels stay consistent.
+        std::vector<double> xLines = {cx - radius, cx - radius * 0.9, cx - radius * 0.5,
+                                      cx, cx + radius * 0.5, cx + radius * 0.9, cx + radius};
+        std::vector<double> yLines = {cy - radius, cy - radius * 0.9, cy - radius * 0.5,
+                                      cy, cy + radius * 0.5, cy + radius * 0.9, cy + radius};
+        auto uniqSort = [](std::vector<double> &vals) {
+            std::sort(vals.begin(), vals.end());
+            vals.erase(std::unique(vals.begin(), vals.end()), vals.end());
+        };
+        uniqSort(xLines);
+        uniqSort(yLines);
+        auto classifyRoad = [&](double coord, bool isX) {
+            double anchor = isX ? cx : cy;
+            double denom = (radius > 1e-6) ? radius : 1.0;
+            double norm = std::abs(coord - anchor) / denom;
+            if (norm < 0.15) return RoadType::Arterial;
+            if (norm < 0.6) return RoadType::Secondary;
+            return RoadType::Local;
+        };
+        auto addRoad = [&](double x0, double y0, double x1, double y1, RoadType t) {
+            city.roads.push_back({x0, y0, x1, y1, t});
+        };
+        // Vertical and horizontal lines spanning the developed area.  Widths are
+        // derived from hierarchy.
+        for (double x : xLines) {
+            RoadType type = classifyRoad(x, true);
+            addRoad(x, cy - radius, x, cy + radius, type);
         }
-    }
-    // 5. Subdivide blocks into parcels and spawn buildings per parcel
-    for (const auto &block : city.blocks) {
-        std::vector<Rect> parcels = parcelizeBlock(block, rng);
-        for (const auto &footprint : parcels) {
-            Rect adjusted = jitterFootprint(footprint, rng);
-            double cxp = adjusted.centreX();
-            double cyp = adjusted.centreY();
-            double dx = cxp - cx;
-            double dy = cyp - cy;
-            double dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > radius * 1.02) continue;
-            ZoneType z = sampleZone(city, adjusted);
-            if (z == ZoneType::None) continue;
-            Building b;
-            b.footprint = adjusted;
-            b.zone = z;
-            b.height = sampleHeight(z, adjusted, dist, radius, rng);
-            b.facility = false;
-            // If the parcel overlaps predominantly green cells, downgrade to green
-            if (z == ZoneType::Green) {
-                b.height = 0;
+        for (double y : yLines) {
+            RoadType type = classifyRoad(y, false);
+            addRoad(cx - radius, y, cx + radius, y, type);
+        }
+        // 4. Derive blocks from road lines (axis-aligned grid between road traces)
+        auto insetFor = [&](double coord, bool isX) {
+            return 0.5 * roadWidth(classifyRoad(coord, isX));
+        };
+        for (std::size_t xi = 0; xi + 1 < xLines.size(); ++xi) {
+            for (std::size_t yi = 0; yi + 1 < yLines.size(); ++yi) {
+                double x0 = xLines[xi] + insetFor(xLines[xi], true);
+                double x1 = xLines[xi + 1] - insetFor(xLines[xi + 1], true);
+                double y0 = yLines[yi] + insetFor(yLines[yi], false);
+                double y1 = yLines[yi + 1] - insetFor(yLines[yi + 1], false);
+                if (x1 <= x0 || y1 <= y0) continue;
+                Rect bounds{x0, y0, x1, y1};
+                double blockCx = bounds.centreX();
+                double blockCy = bounds.centreY();
+                double dx = blockCx - cx;
+                double dy = blockCy - cy;
+                double dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > radius * 1.05) continue; // outside developed area
+                if (bounds.width() < 1.0 || bounds.height() < 1.0) continue;
+                Block blk;
+                blk.bounds = bounds;
+                blk.hasCorners = true;
+                blk.corners = rectToQuad(bounds);
+                city.blocks.push_back(blk);
             }
-            city.buildings.push_back(b);
+        }
+        // 5. Subdivide blocks into parcels and spawn buildings per parcel
+        for (const auto &block : city.blocks) {
+            std::vector<Rect> parcels = parcelizeBlock(block, rng);
+            for (const auto &footprint : parcels) {
+                Rect adjusted = jitterFootprint(footprint, rng);
+                double cxp = adjusted.centreX();
+                double cyp = adjusted.centreY();
+                double dx = cxp - cx;
+                double dy = cyp - cy;
+                double dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > radius * 1.02) continue;
+                ZoneType z = sampleZone(city, adjusted);
+                if (z == ZoneType::None) continue;
+                Building b;
+                b.footprint = adjusted;
+                b.zone = z;
+                b.height = sampleHeight(z, adjusted, dist, radius, rng);
+                b.facility = false;
+                b.hasCorners = true;
+                b.corners = rectToQuad(adjusted);
+                // If the parcel overlaps predominantly green cells, downgrade to green
+                if (z == ZoneType::Green) {
+                    b.height = 0;
+                }
+                city.buildings.push_back(b);
+            }
+        }
+    } else { // Radial layout
+        int ringCount = std::clamp(static_cast<int>(std::round(3.0 + cfg.population / 200000.0)), 3, 8);
+        int radialRoads = std::clamp(static_cast<int>(std::round(10.0 + cfg.city_radius * 8.0)), 8, 20);
+        double maxR = radius;
+        std::vector<double> ringEdges;
+        ringEdges.reserve(ringCount + 2);
+        ringEdges.push_back(0.0);
+        for (int i = 1; i <= ringCount; ++i) {
+            double frac = static_cast<double>(i) / static_cast<double>(ringCount + 1);
+            ringEdges.push_back(maxR * frac);
+        }
+        ringEdges.push_back(maxR);
+        std::sort(ringEdges.begin(), ringEdges.end());
+        ringEdges.erase(std::unique(ringEdges.begin(), ringEdges.end()), ringEdges.end());
+        std::vector<double> angles(radialRoads + 1);
+        const double twoPi = 6.28318530717958647692;
+        double delta = twoPi / static_cast<double>(radialRoads);
+        for (int i = 0; i <= radialRoads; ++i) {
+            angles[i] = delta * static_cast<double>(i);
+        }
+        auto ringType = [&](double r) {
+            double norm = (maxR > 1e-6) ? (r / maxR) : 0.0;
+            if (norm < 0.3) return RoadType::Arterial;
+            if (norm < 0.75) return RoadType::Secondary;
+            return RoadType::Local;
+        };
+        // Ring roads (approximated by segmented polylines)
+        for (std::size_t ri = 1; ri + 1 < ringEdges.size(); ++ri) {
+            double r = ringEdges[ri];
+            int segs = std::max(32, radialRoads * 2);
+            for (int s = 0; s < segs; ++s) {
+                double t0 = twoPi * static_cast<double>(s) / static_cast<double>(segs);
+                double t1 = twoPi * static_cast<double>(s + 1) / static_cast<double>(segs);
+                Vec2 p0 = polarToCartesian(cx, cy, r, t0);
+                Vec2 p1 = polarToCartesian(cx, cy, r, t1);
+                city.roads.push_back({p0.x, p0.y, p1.x, p1.y, ringType(r)});
+            }
+        }
+        // Radial arterials
+        for (int i = 0; i < radialRoads; ++i) {
+            double t = angles[i];
+            Vec2 p0 = polarToCartesian(cx, cy, 0.0, t);
+            Vec2 p1 = polarToCartesian(cx, cy, maxR, t);
+            city.roads.push_back({p0.x, p0.y, p1.x, p1.y, RoadType::Arterial});
+        }
+        // Blocks: wedges defined by consecutive ring bands and angular sectors
+        for (std::size_t ri = 0; ri + 1 < ringEdges.size(); ++ri) {
+            double r0 = ringEdges[ri];
+            double r1 = ringEdges[ri + 1];
+            for (int si = 0; si < radialRoads; ++si) {
+                double a0 = angles[si];
+                double a1 = angles[si + 1];
+                std::array<Vec2, 4> corners = {{
+                    polarToCartesian(cx, cy, r0, a0),
+                    polarToCartesian(cx, cy, r1, a0),
+                    polarToCartesian(cx, cy, r1, a1),
+                    polarToCartesian(cx, cy, r0, a1)
+                }};
+                Rect bounds = boundsFromQuad(corners);
+                Vec2 blockC = centroidOfQuad(corners);
+                double dx = blockC.x - cx;
+                double dy = blockC.y - cy;
+                double dist = std::sqrt(dx * dx + dy * dy);
+                if (dist > radius * 1.1) continue;
+                Block blk;
+                blk.bounds = bounds;
+                blk.hasCorners = true;
+                blk.corners = corners;
+                city.blocks.push_back(blk);
+                auto parcels = parcelizeWedge(cx, cy, r0, r1, a0, a1, rng);
+                for (const auto &quad : parcels) {
+                    Rect parcelBounds = boundsFromQuad(quad);
+                    Vec2 centreP = centroidOfQuad(quad);
+                    double pdx = centreP.x - cx;
+                    double pdy = centreP.y - cy;
+                    double pdist = std::sqrt(pdx * pdx + pdy * pdy);
+                    if (pdist > radius * 1.05) continue;
+                    ZoneType z = sampleZone(city, parcelBounds);
+                    if (z == ZoneType::None) continue;
+                    Building b;
+                    b.footprint = parcelBounds;
+                    b.corners = quad;
+                    b.hasCorners = true;
+                    b.zone = z;
+                    b.height = sampleHeight(z, parcelBounds, pdist, radius, rng);
+                    b.facility = false;
+                    if (z == ZoneType::Green) {
+                        b.height = 0;
+                    }
+                    city.buildings.push_back(b);
+                }
+            }
         }
     }
     // 6. Place facilities (hospitals and schools) on suitable parcels

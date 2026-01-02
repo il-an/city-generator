@@ -47,6 +47,8 @@ struct Config {
     std::string output_prefix = "city";
     enum class ExportFormat { OBJ, GLTF, GLB };
     ExportFormat export_format = ExportFormat::OBJ;
+    enum class LayoutType { Grid, Radial };
+    LayoutType layout = LayoutType::Grid;
 
     // ===== Sanity checks =====
     void normalize() {
@@ -78,4 +80,11 @@ inline Config::ExportFormat exportFormatFromString(std::string s) {
     if (s == "gltf") return Config::ExportFormat::GLTF;
     if (s == "glb") return Config::ExportFormat::GLB;
     throw std::invalid_argument("Unknown export format: " + s);
+}
+
+inline Config::LayoutType layoutTypeFromString(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    if (s == "grid") return Config::LayoutType::Grid;
+    if (s == "radial") return Config::LayoutType::Radial;
+    throw std::invalid_argument("Unknown layout type: " + s);
 }

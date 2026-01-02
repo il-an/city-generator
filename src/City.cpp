@@ -1,29 +1,17 @@
 #include "City.h"
 
 #include <fstream>
-#include <sstream>
-#include <iomanip>
 
 City::City(int s) : size(s) {
-    buildings.resize(size * size);
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            Building &b = buildings[y * size + x];
-            b.x = x;
-            b.y = y;
-            b.zone = ZoneType::None;
-            b.height = 0;
-            b.facility = false;
-        }
-    }
+    zones.resize(size * size, ZoneType::None);
 }
 
 void City::saveOBJ(const std::string &filename) const {
     std::ofstream ofs(filename);
     if (!ofs) return;
-    // Accumulate vertices and faces.  We write one object per building for
-    // clarity, but the file can contain thousands of objects.  A running
-    // vertex index is maintained to offset face indices.
+    // Accumulate vertices and faces.  We write one object per parcel-based
+    // building for clarity, but the file can contain thousands of objects.
+    // A running vertex index is maintained to offset face indices.
     std::size_t vertexOffset = 1;
     for (const auto &b : buildings) {
         // Skip undeveloped and green cells; only extrude actual buildings
@@ -32,10 +20,10 @@ void City::saveOBJ(const std::string &filename) const {
         double h = static_cast<double>(b.height);
         if (h <= 0.0) h = 1.0;
         // Base (ground level) vertices
-        double x0 = static_cast<double>(b.x);
-        double y0 = static_cast<double>(b.y);
-        double x1 = x0 + 1.0;
-        double y1 = y0 + 1.0;
+        double x0 = b.footprint.x0;
+        double y0 = b.footprint.y0;
+        double x1 = b.footprint.x1;
+        double y1 = b.footprint.y1;
         double z0 = 0.0;
         double z1 = h;
         // Write vertices
@@ -84,13 +72,17 @@ void City::saveSummary(const std::string &filename) const {
     std::size_t countGreen = 0;
     std::size_t countUndeveloped = 0;
     std::size_t totalBuildings = 0;
+    for (const auto z : zones) {
+        if (z == ZoneType::None) { countUndeveloped++; continue; }
+        if (z == ZoneType::Residential) countResidential++;
+        else if (z == ZoneType::Commercial) countCommercial++;
+        else if (z == ZoneType::Industrial) countIndustrial++;
+        else if (z == ZoneType::Green) countGreen++;
+    }
     for (const auto &b : buildings) {
-        if (b.zone == ZoneType::None) { countUndeveloped++; continue; }
-        if (b.zone == ZoneType::Residential) countResidential++;
-        else if (b.zone == ZoneType::Commercial) countCommercial++;
-        else if (b.zone == ZoneType::Industrial) countIndustrial++;
-        else if (b.zone == ZoneType::Green) countGreen++;
-        if (b.zone != ZoneType::Green) totalBuildings++;
+        if (b.zone != ZoneType::None && b.zone != ZoneType::Green) {
+            totalBuildings++;
+        }
     }
     std::size_t countHospitals = 0;
     std::size_t countSchools = 0;
